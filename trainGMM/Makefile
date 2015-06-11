@@ -10,13 +10,14 @@ LINK   =  -L ../vlfeat-0.9.20/bin/maci64 -lm -ltiff -lopencv_highgui -lopencv_co
 .cpp.o:
 	$(CPP) $(CFLAGS) -c $< -o $@
 
-all: segment
+all: pca_opencv
 
-segment: segment.cpp segment-image.h segment-graph.h disjoint-set.h
-	$(CPP) $(CFLAGS) -o segment segment.cpp $(LINK)
+#segment: segment.cpp $(CPP) $(CFLAGS) -o segment segment.cpp $(LINK)
+pca_opencv: pca_opencv.cpp 
+	$(CPP) $(CFLAGS) -o pca_opencv pca_opencv.cpp $(LINK)
 
 clean:
-	/bin/rm -f segment *.o
+	/bin/rm -f pca_opencv *.o
 
 clean-all: clean
 	/bin/rm -f *~ 
