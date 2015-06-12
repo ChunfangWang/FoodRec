@@ -1,145 +1,223 @@
-#include <iostream>
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/features2d/features2d.hpp>
+#include <opencv2/nonfree/features2d.hpp>
+#include <opencv2/nonfree/nonfree.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+
 #include <fstream>
 #include <sstream>
-
-#include <opencv2/core/core.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/highgui/highgui.hpp>
+#include <iostream>
+#include <map>
+#include <iterator>
+#include <vector>
 
 using namespace cv;
 using namespace std;
 
-///////////////////////
-// Functions
-static void read_imgList(const string& filename, vector<Mat>& images) {
+// Reads the images and labels from a given CSV file, a valid file would
+// look like this:
+//
+//      /path/to/person0/image0.jpg;0
+//      /path/to/person0/image1.jpg;0
+//      /path/to/person1/image0.jpg;1
+//      /path/to/person1/image1.jpg;1
+//      ...
+//
+void read_csv(const string& filename, vector<Mat>& images, vector<int>& labels) {
     std::ifstream file(filename.c_str(), ifstream::in);
-    if (!file) {
-        string error_message = "No valid input file was given, please check the given filename.";
-        CV_Error(Error::StsBadArg, error_message);
-    }
-    string line;
-    while (getline(file, line)) {
-        images.push_back(imread(line, 0));
+    if(!file)
+        throw std::exception();
+    std::string line, path, classlabel;
+    // For each line in the given file:
+    while (std::getline(file, line)) {
+        // Get the current line:
+        std::stringstream liness(line);
+        // Split it at the semicolon:
+        std::getline(liness, path, ';');
+        std::getline(liness, classlabel);
+        // And push back the data into the result vectors:
+        images.push_back(imread(path, IMREAD_GRAYSCALE));
+        labels.push_back(atoi(classlabel.c_str()));
     }
 }
 
-static  Mat formatImagesForPCA(const vector<Mat> &data)
+void read_txt(const string& filename, const string& prefix, map<string, vector<string> >& dict)
 {
-    Mat dst(static_cast<int>(data.size()), data[0].rows*data[0].cols, CV_32F);
-    for(unsigned int i = 0; i < data.size(); i++)
-    {
-        Mat image_row = data[i].clone().reshape(1,1);
-        Mat row_i = dst.row(i);
-        image_row.convertTo(row_i,CV_32F);
+    std::ifstream file(filename.c_str(), ifstream::in);
+    if(!file)
+        throw std::exception();
+    std::string line, path, classlabel;
+    // For each line in the given file:
+    while (std::getline(file, line)) {
+        // Get the current line:
+        std::stringstream liness(line);
+        // Split it at the semicolon:
+        std::getline(liness, classlabel, '/');
+        path =  prefix+line+".jpg";
+        dict[classlabel].push_back(path);
     }
-    return dst;
 }
 
-static Mat toGrayscale(InputArray _src) {
-    Mat src = _src.getMat();
-    // only allow one channel
-    if(src.channels() != 1) {
-        CV_Error(Error::StsBadArg, "Only Matrices with one channel are supported");
-    }
-    // create and return normalized image
+// Normalizes a given image into a value range between 0 and 255.
+Mat norm_0_255(const Mat& src) {
+    // Create and return normalized image:
     Mat dst;
-    cv::normalize(_src, dst, 0, 255, NORM_MINMAX, CV_8UC1);
+    switch(src.channels()) {
+    case 1:
+        cv::normalize(src, dst, 0, 255, NORM_MINMAX, CV_8UC1);
+        break;
+    case 3:
+        cv::normalize(src, dst, 0, 255, NORM_MINMAX, CV_8UC3);
+        break;
+    default:
+        src.copyTo(dst);
+        break;
+    }
     return dst;
 }
 
-struct params
-{
-    Mat data;
-    int ch;
-    int rows;
-    PCA pca;
-    string winName;
-};
-
-static void onTrackbar(int pos, void* ptr)
-{
-    cout << "Retained Variance = " << pos << "%   ";
-    cout << "re-calculating PCA..." << std::flush;
-
-    double var = pos / 100.0;
-
-    struct params *p = (struct params *)ptr;
-
-    p->pca = PCA(p->data, cv::Mat(), PCA::DATA_AS_ROW, var);
-
-    Mat point = p->pca.project(p->data.row(0));
-    Mat reconstruction = p->pca.backProject(point);
-    reconstruction = reconstruction.reshape(p->ch, p->rows);
-    reconstruction = toGrayscale(reconstruction);
-
-    imshow(p->winName, reconstruction);
-    cout << "done!   # of principal components: " << p->pca.eigenvectors.rows << endl;
+// Converts the images given in src into a row matrix.
+Mat asRowMatrix(const vector<Mat>& src, int rtype, double alpha = 1, double beta = 0) {
+    // Number of samples:
+    size_t n = src.size();
+    // Return empty matrix if no matrices given:
+    if(n == 0)
+        return Mat();
+    // dimensionality of (reshaped) samples
+    size_t d = src[0].total();
+    // Create resulting data matrix:
+    Mat data(n, d, rtype);
+    // Now copy data:
+    for(int i = 0; i < n; i++) {
+        //
+        if(src[i].empty()) {
+            string error_message = format("Image number %d was empty, please check your input data.", i);
+            CV_Error(CV_StsBadArg, error_message);
+        }
+        // Make sure data can be reshaped, throw a meaningful exception if not!
+        if(src[i].total() != d) {
+            string error_message = format("Wrong number of elements in matrix #%d! Expected %d was %d.", i, d, src[i].total());
+            CV_Error(CV_StsBadArg, error_message);
+        }
+        // Get a hold of the current row:
+        Mat xi = data.row(i);
+        // Make reshape happy by cloning for non-continuous matrices:
+        if(src[i].isContinuous()) {
+            src[i].reshape(1, 1).convertTo(xi, rtype, alpha, beta);
+        } else {
+            src[i].clone().reshape(1, 1).convertTo(xi, rtype, alpha, beta);
+        }
+    }
+    return data;
 }
 
+int main(int argc, const char *argv[]) {
 
-///////////////////////
-// Main
-int main(int argc, char** argv)
-{
-    if (argc != 2) {
-        cout << "usage: " << argv[0] << " <image_list.txt>" << endl;
-        exit(1);
+    // Holds some images:
+    vector<Mat> SURF_images;
+    vector<Mat> Lab_images;
+
+    string prefix = "/Users/Chunfang/Documents/food-101/images/";
+
+    map<string, vector<string> > dict;
+    read_txt("train30.txt", prefix, dict);
+    for(map<string, vector<string> >::iterator it = dict.begin(); it!= dict.end(); ++it)
+    {
+        for(int i = 0; i < 1; ++i)
+        {
+            Mat im_rgb = imread(it->second[i], CV_LOAD_IMAGE_COLOR);
+        /*************************************
+            SURF
+            */
+        // Mat im = imread(it->second[i], IMREAD_GRAYSCALE);
+        Mat im = cvCreateMat(im_rgb.rows, im_rgb.cols, CV_8UC1);
+        cvtColor(im_rgb, im, CV_BGR2GRAY);
+        int minHessian = 400;
+        
+        //surf(hessionThreshold, nOctaves, nOctaveLayers, extended(0:64, 1:128), upright)
+        SURF surf(minHessian, 4, 2, 0, 0);
+        Mat descriptors;
+        SurfFeatureDetector SurfDetector(minHessian);
+        vector<KeyPoint> keypoints;
+        surf(im, cv::Mat(), keypoints, descriptors, false);
+
+        //perform PCA on the descriptors extracted on one image
+        int num_components = 32;
+        PCA pca(descriptors, Mat(), CV_PCA_DATA_AS_ROW, num_components); //calculate the mean of data
+        // And copy the PCA results:
+        Mat mean = pca.mean.clone();
+        Mat eigenvalues = pca.eigenvalues.clone();
+        Mat eigenvectors = pca.eigenvectors.clone();
+
+        Mat descriptors_rot = pca.project( (descriptors - repeat(mean, descriptors.rows, 1)) );
+        Mat sqrofeigenvalues;
+        sqrt(eigenvalues.reshape(0,1), sqrofeigenvalues);
+        Mat descriptors_rotwhiten;
+        divide(descriptors_rot, repeat( sqrofeigenvalues, descriptors_rot.rows, 1), descriptors_rotwhiten);
+        SURF_images.push_back(descriptors_rotwhiten);
+        // SURF_image_kp.push_back(keypoints);
+
+        /***************************************
+            Lab color
+            */
+        Mat im_Lab = cvCreateMat(im_rgb.rows, im_rgb.cols, CV_8UC1);
+        Mat Lab_vec = cvCreateMat(im_rgb.rows * im_rgb.cols, 3, CV_8UC1);
+        cvtColor(im_rgb, im_Lab, CV_BGR2Lab);
+        //reshape the LAB values into a matrix with the rows are [l, a, b] values for each pixel
+        Lab_vec = im_Lab.clone().reshape(1, im_rgb.rows * im_rgb.cols);
+        std::cout<<Lab_vec.at<int>(15, 2)<<" "<<im_Lab.at<Vec3b>(0, 15)[2]<<std::endl;
+        PCA pca_lab(Lab_vec, Mat(), CV_PCA_DATA_AS_ROW, 2); 
+        Mat mean_lab = pca_lab.mean.clone();
+        Mat eigenvalues_lab = pca_lab.eigenvalues.clone();
+        Mat eigenvectors_lab = pca_lab.eigenvectors.clone();
+
+        Mat temp = repeat(mean_lab, Lab_vec.rows, 1);
+        Mat temp1 =  Lab_vec - temp;
+        Mat Lab_rot = pca_lab.project( (Lab_vec - repeat(mean_lab, Lab_vec.rows, 1)) );
+        Mat sqrofeigenvalues_lab;
+        sqrt(eigenvalues_lab.reshape(0,1), sqrofeigenvalues_lab);
+        Mat Lab_rotwhiten;
+        divide(Lab_rot, repeat( sqrofeigenvalues_lab, Lab_rot.rows, 1), Lab_rotwhiten);
+        Lab_images.push_back(Lab_rotwhiten);
+        }
+
     }
+    // Build a matrix with all the observations in row:
+    Mat SURF_data = asRowMatrix(SURF_images, CV_32FC1);
+    Mat LAB_data = asRowMatrix(Lab_images, CV_32FC1);
 
-    // Get the path to your CSV.
-    string imgList = string(argv[1]);
+    // Number of components to keep for the PCA:
+    // int num_components = 100;
 
-    // vector to hold the images
-    vector<Mat> images;
+    // Perform a PCA:
+    // PCA pca(data, Mat(), CV_PCA_DATA_AS_ROW, 0.99);
 
-    // Read in the data. This can fail if not valid
-    try {
-        read_imgList(imgList, images);
-    } catch (cv::Exception& e) {
-        cerr << "Error opening file \"" << imgList << "\". Reason: " << e.msg << endl;
-        exit(1);
-    }
+    // // And copy the PCA results:
+    // Mat mean = pca.mean.clone();
+    // Mat eigenvalues = pca.eigenvalues.clone();
+    // Mat eigenvectors = pca.eigenvectors.clone();
+    
 
-    // Quit if there are not enough images for this demo.
-    if(images.size() <= 1) {
-        string error_message = "This demo needs at least 2 images to work. Please add more images to your data set!";
-        CV_Error(Error::StsError, error_message);
-    }
+    // db.push_back(eigenvectors); 
+    // The following would read the images from a given CSV file
+    // instead, which would look like:
+    //
+    //      /path/to/person0/image0.jpg;0
+    //      /path/to/person0/image1.jpg;0
+    //      /path/to/person1/image0.jpg;1
+    //      /path/to/person1/image1.jpg;1
+    //      ...
+    //
+    // Uncomment this to load from a CSV file:
+    //
 
-    // Reshape and stack images into a rowMatrix
-    Mat data = formatImagesForPCA(images);
+    /*
+    vector<int> labels;
+    read_csv("/home/philipp/facerec/data/at.txt", db, labels);
+    */
 
-    // perform PCA
-    PCA pca(data, cv::Mat(), PCA::DATA_AS_ROW, 0.95); // trackbar is initially set here, also this is a common value for retainedVariance
 
-    // Demonstration of the effect of retainedVariance on the first image
-    Mat point = pca.project(data.row(0)); // project into the eigenspace, thus the image becomes a "point"
-    Mat reconstruction = pca.backProject(point); // re-create the image from the "point"
-    reconstruction = reconstruction.reshape(images[0].channels(), images[0].rows); // reshape from a row vector into image shape
-    reconstruction = toGrayscale(reconstruction); // re-scale for displaying purposes
-
-    // init highgui window
-    string winName = "Reconstruction | press 'q' to quit";
-    namedWindow(winName, WINDOW_NORMAL);
-
-    // params struct to pass to the trackbar handler
-    params p;
-    p.data = data;
-    p.ch = images[0].channels();
-    p.rows = images[0].rows;
-    p.pca = pca;
-    p.winName = winName;
-
-    // create the tracbar
-    int pos = 95;
-    createTrackbar("Retained Variance (%)", winName, &pos, 100, onTrackbar, (void*)&p);
-
-    // display until user presses q
-    imshow(winName, reconstruction);
-
-    int key = 0;
-    while(key != 'q')
-        key = waitKey();
-
-   return 0;
+    // Success!
+    return 0;
 }
