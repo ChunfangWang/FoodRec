@@ -12,6 +12,13 @@
 #include <iterator>
 #include <vector>
 
+extern "C" {
+  #include "vl/generic.h"
+  #include "vl/slic.h"
+  #include "vl/fisher.h"
+  #include "vl/gmm.h"
+}
+
 using namespace cv;
 using namespace std;
 
@@ -115,25 +122,26 @@ Mat asRowMatrix(const vector<Mat>& src, int rtype, double alpha = 1, double beta
 int main(int argc, const char *argv[]) {
 
     // Holds some images:
-    vector<Mat> SURF_images;
-    vector<Mat> Lab_images;
+    Mat SURF_images;
+    Mat Lab_images;
 
     string prefix = "/Users/Chunfang/Documents/food-101/images/";
 
     map<string, vector<string> > dict;
     read_txt("train30.txt", prefix, dict);
+    long num_images= 0;
     for(map<string, vector<string> >::iterator it = dict.begin(); it!= dict.end(); ++it)
     {
         for(int i = 0; i < 1; ++i)
         {
+            cout<<it->second[i]<<endl;
             Mat im_rgb = imread(it->second[i], CV_LOAD_IMAGE_COLOR);
         /*************************************
             SURF
             */
-        // Mat im = imread(it->second[i], IMREAD_GRAYSCALE);
         Mat im = cvCreateMat(im_rgb.rows, im_rgb.cols, CV_8UC1);
         cvtColor(im_rgb, im, CV_BGR2GRAY);
-        int minHessian = 400;
+        int minHessian = 400; float epsilon = 0.1;
         
         //surf(hessionThreshold, nOctaves, nOctaveLayers, extended(0:64, 1:128), upright)
         SURF surf(minHessian, 4, 2, 0, 0);
@@ -143,8 +151,7 @@ int main(int argc, const char *argv[]) {
         surf(im, cv::Mat(), keypoints, descriptors, false);
 
         //perform PCA on the descriptors extracted on one image
-        int num_components = 32;
-        PCA pca(descriptors, Mat(), CV_PCA_DATA_AS_ROW, num_components); //calculate the mean of data
+        PCA pca(descriptors, Mat(), CV_PCA_DATA_AS_ROW); //calculate the mean of data
         // And copy the PCA results:
         Mat mean = pca.mean.clone();
         Mat eigenvalues = pca.eigenvalues.clone();
@@ -152,71 +159,74 @@ int main(int argc, const char *argv[]) {
 
         Mat descriptors_rot = pca.project( (descriptors - repeat(mean, descriptors.rows, 1)) );
         Mat sqrofeigenvalues;
-        sqrt(eigenvalues.reshape(0,1), sqrofeigenvalues);
+        // Mat temp2 = eigenvalues.reshape(0,1)+epsilon;
+        // std::cout<<eigenvalues.at<float>(5)<<" "<<temp2.at<float>(5)<<std::endl;
+        sqrt(eigenvalues.reshape(0,1)+epsilon, sqrofeigenvalues);
+
         Mat descriptors_rotwhiten;
         divide(descriptors_rot, repeat( sqrofeigenvalues, descriptors_rot.rows, 1), descriptors_rotwhiten);
         SURF_images.push_back(descriptors_rotwhiten);
+        // cout<<"SURF_images type "<<SURF_images.type()<<" "SURF_images.data().type()<<endl;
         // SURF_image_kp.push_back(keypoints);
 
         /***************************************
             Lab color
             */
-        Mat im_Lab = cvCreateMat(im_rgb.rows, im_rgb.cols, CV_8UC1);
-        Mat Lab_vec = cvCreateMat(im_rgb.rows * im_rgb.cols, 3, CV_8UC1);
+        Mat im_Lab = cvCreateMat(im_rgb.rows, im_rgb.cols, CV_8UC3);
+        Mat Lab_vec = cvCreateMat(im_rgb.rows * im_rgb.cols, 3, CV_32FC1);
         cvtColor(im_rgb, im_Lab, CV_BGR2Lab);
         //reshape the LAB values into a matrix with the rows are [l, a, b] values for each pixel
-        Lab_vec = im_Lab.clone().reshape(1, im_rgb.rows * im_rgb.cols);
-        std::cout<<Lab_vec.at<int>(15, 2)<<" "<<im_Lab.at<Vec3b>(0, 15)[2]<<std::endl;
-        PCA pca_lab(Lab_vec, Mat(), CV_PCA_DATA_AS_ROW, 2); 
+        im_Lab.reshape(1, im_rgb.rows * im_rgb.cols).convertTo(Lab_vec, CV_32FC1);
+        // std::cout<<Lab_vec.at<float>(15, 2)<<" "<<(int)im_Lab.at<Vec3b>(0, 15)[2]<<std::endl;
+        PCA pca_lab(Lab_vec, Mat(), CV_PCA_DATA_AS_ROW); 
         Mat mean_lab = pca_lab.mean.clone();
         Mat eigenvalues_lab = pca_lab.eigenvalues.clone();
         Mat eigenvectors_lab = pca_lab.eigenvectors.clone();
-
-        Mat temp = repeat(mean_lab, Lab_vec.rows, 1);
-        Mat temp1 =  Lab_vec - temp;
         Mat Lab_rot = pca_lab.project( (Lab_vec - repeat(mean_lab, Lab_vec.rows, 1)) );
         Mat sqrofeigenvalues_lab;
-        sqrt(eigenvalues_lab.reshape(0,1), sqrofeigenvalues_lab);
+        sqrt(eigenvalues_lab.reshape(0,1)+epsilon, sqrofeigenvalues_lab);
+
+        // cout<<"Lab eigenvalues..."<<endl;
+        // for(int i = 0; i < sqrofeigenvalues_lab.cols; i++)
+        //     std::cout<<sqrofeigenvalues_lab.at<float>(i)<<std::endl;
+
         Mat Lab_rotwhiten;
         divide(Lab_rot, repeat( sqrofeigenvalues_lab, Lab_rot.rows, 1), Lab_rotwhiten);
         Lab_images.push_back(Lab_rotwhiten);
+
+        num_images++;
         }
-
     }
-    // Build a matrix with all the observations in row:
-    Mat SURF_data = asRowMatrix(SURF_images, CV_32FC1);
-    Mat LAB_data = asRowMatrix(Lab_images, CV_32FC1);
 
-    // Number of components to keep for the PCA:
-    // int num_components = 100;
+    //estimate the ram need to store the SURF and Lab samples (around 20G)
+    int numClusters = 64; int dimensions = SURF_images.cols;
+    int max_descriptors_per_img = 2048;
+    long descriptors_length = SURF_images.cols;
+    double num_feats = (double)num_images * max_descriptors_per_img;
+    double feature_size_gb = num_feats * descriptors_length * sizeof(float) / 1024. / 1024. / 1024.;
+    double posteriory_size_gb = num_feats * numClusters * sizeof(float) / 1024. / 1024. / 1024.;
+    double total_gb = feature_size_gb +  posteriory_size_gb;
+    std::cout << "will presumably use a bit more than " 
+    << total_gb << " GB of memory. (feat="<< feature_size_gb << "gb, posteriors="
+    << posteriory_size_gb << "gb)";
 
-    // Perform a PCA:
-    // PCA pca(data, Mat(), CV_PCA_DATA_AS_ROW, 0.99);
+    //surf-gmm
+    VlGMM* gmm_surf = vl_gmm_new(VL_TYPE_FLOAT, dimensions, numClusters);
+    vector<float> SURF_data;
+    SURF_images.reshape(0, 1).copyTo(SURF_data);
+    vl_gmm_cluster(gmm_surf, (void*)SURF_data.data(), SURF_images.rows);
+    float* gmm_surf_mean = (float*)vl_gmm_get_means(gmm_surf);
+    float* surf_covariances =  (float*)vl_gmm_get_covariances(gmm_surf);
+    float* surf_priors = (float*)vl_gmm_get_priors(gmm_surf);
 
-    // // And copy the PCA results:
-    // Mat mean = pca.mean.clone();
-    // Mat eigenvalues = pca.eigenvalues.clone();
-    // Mat eigenvectors = pca.eigenvectors.clone();
-    
-
-    // db.push_back(eigenvectors); 
-    // The following would read the images from a given CSV file
-    // instead, which would look like:
-    //
-    //      /path/to/person0/image0.jpg;0
-    //      /path/to/person0/image1.jpg;0
-    //      /path/to/person1/image0.jpg;1
-    //      /path/to/person1/image1.jpg;1
-    //      ...
-    //
-    // Uncomment this to load from a CSV file:
-    //
-
-    /*
-    vector<int> labels;
-    read_csv("/home/philipp/facerec/data/at.txt", db, labels);
-    */
-
+    //lab-gmm
+    VlGMM* gmm_lab = vl_gmm_new(VL_TYPE_FLOAT, dimensions, numClusters);
+    vector<float> Lab_data;
+    Lab_images.reshape(0, 1).copyTo(Lab_data);
+    vl_gmm_cluster(gmm_surf, (void*)Lab_data.data(), Lab_images.rows);
+    float* gmm_lab_mean = (float*)vl_gmm_get_means(gmm_surf);
+    float* lab_covariances =  (float*)vl_gmm_get_covariances(gmm_surf);
+    float* lab_priors = (float*)vl_gmm_get_priors(gmm_surf);
 
     // Success!
     return 0;
